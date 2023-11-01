@@ -1,16 +1,21 @@
-import copy
 import logging
 import os
+import copy
 import time
+from itertools import chain
+from typing import List, Type
 from unittest import TestCase
 
 import matplotlib.pyplot as plt
 import numpy as np
-from ranking_bandit_agent import RankingBanditAgent
+import pandas as pd
 import pytest
 
-from ranking_bandit_agent import RankingBanditAgent
-from simulator import AbstractSimulator, DatasetSimulator, GenerativeSimulator
+from ranking_bandit_agent import Profit
+# from feature_quantizer import CategoricalFeature, FeatureOneHotQuantizer
+
+from ranking_bandit_agent import PROPENSITY_COL, UCB_PROPENSITY_COL, UNCERTAINTY_COL, RankingBanditAgent
+from simulator import AbstractSimulator, GenerativeSimulator
 
 LOG: logging.Logger = logging.getLogger(__name__)
 
@@ -18,37 +23,88 @@ LOG: logging.Logger = logging.getLogger(__name__)
 PLOTS_SAVE_PATH = "./sim_plots"
 RESULTS_SAVE_PATH = "./sim_results"
 
-
-CONTINUOUS_CONTEXT_COLUMNS = [
-    "context__1",
-    "context__2",
-    "context__3",
-    "context__4",
-    "context__5",
-    "context__6",
-    "context__7",
-]
-
-TRAINING_DATA_CSV = "training_data.csv"
+MEASURED_REWARD_COLUMN = "realized_reward"
+STATE_COLUMNS: List[str] = ["state_0", "state_1", "state_2"]
+ACTION_ID: str = "test_action_id"
+CONTEXT_COLUMN_PREFIX = "context__"
+EXTRA_COLUMN_PREFIX = "extra__"
+QUANTIZER_SUFFIX = "__quantized"
+USER_ID_COLUMN = "user_id"
+PRODUCT_ID_COLUMN = "product_id"
+RANK_COLUMN = "rank_col"
 
 
 class RankingBanditAgentSimulationTests(TestCase):
     def setUp(self) -> None:
-        self.n_items = 3
+        self.n_items = 5
+        self.context_dim = 7
 
-        self.ranking_agent = RankingBanditAgent(
-            state_columns=CONTINUOUS_CONTEXT_COLUMNS,
-            reward_col="reward__ordered",
-            top_k=self.n_items,
+        self.agent = RankingBanditAgent(
+            context_dim=self.context_dim,
+            n_items=self.n_items,
             randomization_horizon=5,
         )
 
-    def test_regret(
+    
+    def test_predict(self) -> None:
+        # The example here is that given we are out of coke,
+        # In what order should we reccommend the 5 beverages?
+
+        for i in range(10):
+            input_df = np.random.rand(self.n_items, i, self.context_dim+1) # first dim for rank
+            clicks = np.random.choice([0, 1], p=[0.5, 0.5], size=(self.n_items,1))
+            self.agent.update(input_df, clicks)
+
+        # breakpoint()
+        output_df = self.agent.rank(input_df[:, :, 1:])
+
+        # # Modify the below expected_output_df here
+        # expected_output_df = pd.DataFrame(
+        #     {
+        #         "user_id": ["123"] * 5,
+        #         "id__context": ["coke"] * 5,
+        #         "id__action__context": ["pepsi", "sprite", "juice", "coffee", "tea"],
+        #         "p_value": [0.5] * 5,
+        #     }
+        # )
+        # pd.testing.assert_frame_equal(output_df, expected_output_df)
+
+    def test_fit_and_update(self) -> None:
+        input_df = pd.DataFrame(
+            {
+                "user_id": ["123", "123", "123", "123", "123"],
+                "id__context": ["coke"] * 5,
+                "context__price": [100, 100, 100, 100, 100],
+                "action__context__price": [150, 100, 120, 130, 140],
+                "action__rank_position": [0, 1, 2, 3, 4],
+                "reward__ordered": [0, 1, 1, 1, 0],
+            }
+        )
+        for i in range(100):
+            print("iter ", i)
+            self.ranking_agent.update(input_df)
+            ranking = self.ranking_agent.predict()
+            input_df["action__rank_position"] = ranking
+            if np.array(ranking.values)[0] == 1 and np.array(ranking.values)[1] == 0:
+                input_df["reward__ordered"] = [1, 1, 0, 0, 0]
+            else:
+                input_df["reward__ordered"] = list(np.random.choice([0, 1], size=(5,), p=[14.0 / 15, 1.0 / 15]))
+                # input_df["reward"] = [0, 0, 0, 0, 0]
+
+            # print("params: ", self.ranking_agent.params)
+            print("ranking: ", ranking.ranking.tolist())
+            print()
+
+        pd.testing.assert_frame_equal(ranking[:2], pd.DataFrame([1, 0], columns=["ranking"]))
+
+
+    @pytest.mark.agent_performance_slow_test
+    def test_regret_generative(
         self,
-        runs: int = 25,
-        steps: int = 150,
+        runs: int = 100,
+        steps: int = 100,
         batch_size: int = 1,
-        use_all_data: bool = False,
+        use_all_data: bool = True,
         reward_noise: float = 0.0,
     ) -> None:
         """Run a simulation with the ranking agent and compare the total regret to that of the optimal policy
@@ -67,28 +123,63 @@ class RankingBanditAgentSimulationTests(TestCase):
             reward_noise: float
                 The amount of noise to add to the reward. Modelled as adding a random number from a normal distribution
                 with mean 0 and standard deviation reward_noise to the bernoulli parameter of true reward distribution.
+            source_file: str
+                The path to the csv file containing the historical data to use for pretraining the model.
         """
+        self._test_regret_base(
+            simulator=GenerativeSimulator,
+            runs=runs,
+            steps=steps,
+            batch_size=batch_size,
+            use_all_data=use_all_data,
+            reward_noise=reward_noise,
+        )
+    
+    def _test_regret_base(
+        self,
+        simulator: Type[AbstractSimulator],
+        runs: int = 100,
+        steps: int = 100,
+        batch_size: int = 1,
+        use_all_data: bool = True,
+        reward_noise: float = 0.0,
+    ) -> None:
+        """Run a simulation with the ranking agent and compare the total regret to that of the optimal policy
+        where the optimal policy is computed using an 'oracle' that knows the true reward distribution. The 'true'
+        reward distribution is generated by pretraining a Logistic Regression model on the provided historical data.
 
-        agent = self.ranking_agent
+        Parameters
+        ----------
+            runs: int
+                The simulations to perform per ksi value (UCB parameter)
+            steps: int
+                The number of steps to run each simulation for.
+            use_all_data: bool
+                Whether to use the cumulatively observed data for each update of the model, or to only use the data
+                observed in the current batch
+            reward_noise: float
+                The amount of noise to add to the reward. Modelled as adding a random number from a normal distribution
+                with mean 0 and standard deviation reward_noise to the bernoulli parameter of true reward distribution.
+            source_file: str
+                The path to the csv file containing the historical data to use for pretraining the model.
+        """
 
         # ensure the save paths exist
         os.makedirs(RESULTS_SAVE_PATH, exist_ok=True)
         os.makedirs(PLOTS_SAVE_PATH, exist_ok=True)
 
-        # config = self.ranking_agent_config
-        agent.objective = "Profit"
-        agent.action_weight_col = "sale_price"
-        ksi_list = [0, 0.25, 0.5, 1, 2]
+        ksi_list = [0, 0.03, 0.05, 0.09, 0.1]
 
         regret: dict[float, np.ndarray] = {}
         cumulative: dict[float, np.ndarray] = {}
         for ksi in ksi_list:
             all_runs_regret = []
-            agent.ksi = ksi
 
-            ranking_agent = copy.deepcopy(agent)  # type: ignore
-            ground_truth_agent = copy.deepcopy(agent)
-            sim = GenerativeSimulator(ranking_agent, ground_truth_agent, self.n_items)
+            ranking_agent = copy.deepcopy(self.agent)  # type: ignore
+            ground_truth_agent = copy.deepcopy(self.agent)
+            ranking_agent.ksi = ksi
+            ground_truth_agent.ksi = ksi
+            sim = simulator(ranking_agent, ground_truth_agent, self.n_items)
 
             print(f"Starting {runs} runs with ksi={ksi}")
             tik = time.perf_counter()
@@ -98,7 +189,6 @@ class RankingBanditAgentSimulationTests(TestCase):
                     batch_size=batch_size,
                     add_noise=reward_noise,
                     use_all_data=use_all_data,
-                    data_path=None,
                 )
                 all_runs_regret.append(sample_regret)
 
@@ -113,8 +203,8 @@ class RankingBanditAgentSimulationTests(TestCase):
             )
 
             np.save(
-                f"./sim_results/simulation_results_items_{self.n_items}_runs_{runs}_steps_{steps}_"
-                + f"rh_{agent.randomization_horizon}_ksi_{ksi}_bnorm_{0.2}_noise_{reward_noise}",
+                f"./sim_results/simulation_cat_results_items_{self.n_items}_runs_{runs}_steps_{steps}_"
+                + f"rh_{ranking_agent.randomization_horizon}_ksi_{ksi}_bnorm_{0.2}_noise_{reward_noise}",
                 ksi_regret,
             )
             regret[ksi] = np.mean(all_runs_regret, axis=0)
@@ -140,6 +230,6 @@ class RankingBanditAgentSimulationTests(TestCase):
             ax.legend()
 
         fig.savefig(
-            f"./sim_plots/simulation_plot_items_{self.n_items}_runs_{runs}_steps_{steps}.png"  # noqa
+            f"./sim_plots/simulation_cat_plot_items_{self.n_items}_runs_{runs}_steps_{steps}.png"  # noqa
         )
         plt.clf()

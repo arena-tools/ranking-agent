@@ -2,24 +2,30 @@ from __future__ import annotations
 
 from collections import namedtuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Callable, Dict, Hashable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Hashable, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn import linear_model
 
-
-MAX_CONCURRENCY = 4
+MAX_CONCURRENCY = 2
+PROPENSITY_COL = "estimated_probability"
+UCB_PROPENSITY_COL = "UCB_" + PROPENSITY_COL
+UNCERTAINTY_COL = "ucb_bonus"
 INTERCEPT_COL = "intercept"
+QUANTIZED_COLUMN_PREFIX = "quantized__"
 ZERO_ONE_CLASSES = [0, 1]
-MAX_SGD_ITERS = 250
+MAX_SGD_ITERS = 100
 
 ParamTuple = namedtuple("ParamTuple", ["action_id", "weight", "cov"])
 ParamUpdate = Tuple[np.ndarray, np.ndarray]
 
+CTR: Literal["click-through-rate"] = "click-through-rate"
+Profit: Literal["profit"] = "profit"
+Objective = Literal["click-through-rate", "profit"]
 
-class RankingBanditAgent():
+class RankingBanditAgent(object):
     """Active learning agent that learns to rank.
 
     This agent models the probability of clicking on each item as a logistic
@@ -41,59 +47,50 @@ class RankingBanditAgent():
 
     def __init__(
         self,
-        reward_col: str,
-        state_columns: List[str],
-        state_id_col: str = "user_id",
-        action_id_col: str = "product_id",
-        rank_col: str = "rank",
         ksi: float = 1,
+        context_dim: int = 5,
         horizon: int = 1000,
         randomization_horizon: int = 10,
         gd_n_steps: int = 10,
         learning_rate: float = 0.003,
-        cov_lambda: float = 1.0,
-        top_k: Optional[int] = None,
-        objective: str = "Profit",
+        n_items: Optional[int] = 3,
+        objective: str = "click-through-rate",
         action_weight_col: Optional[str] = None,
         ucb: bool = True,
         **kwargs: Any,
     ):
-        self.ucb: bool = ucb
-        self.ksi: float = ksi
-        self.horizon: int = horizon
-        self.randomization_horizon: int = randomization_horizon
-        self.cov_lambda: float = cov_lambda
-        self._top_k: int | float = top_k or float("inf")
-        self.gd_n_steps: int = gd_n_steps
-        self.learning_rate: float = learning_rate
+        super().__init__()
+        self.ucb = ucb
+        self.ksi = ksi
+        self.horizon = horizon
+        self.randomization_horizon = randomization_horizon
+        self.n_items = n_items
+        self.gd_n_steps = gd_n_steps
+        self.learning_rate = learning_rate
 
-        self.state_columns: List[str] = state_columns
-        self.state_id_col: str = state_id_col  # one for each client decision, batch_id
-        self.action_id_col: str = action_id_col  # product name or product id
-        self.rank_col: str = rank_col
-        self.reward_col: str = reward_col
-
-        # allow for model to optimize for different objective functions
+        self.action_weight_col = action_weight_col
         self.objective = objective
-        self.action_weight_col: Optional[str] = action_weight_col
 
-        self.feature_columns: List[str] = self.state_columns + [self.rank_col]
-        self.state_dim: int = len(self.state_columns)
-        self.feature_dim: int = len(self.feature_columns) + 1  # +1 for the intercept term
+        self.context_dim: int = context_dim
+        self.feature_dim: int = context_dim + 2  # +2 for the rank and intercept term [intercept, features, rank]
+
+        # TODO: expect update df to be [n_items, time, context]
 
         self._init_model()
         self.time = 0
 
     def _init_model(self) -> None:
         # initialize empty parameter and covariance matrices
-        self.params = np.zeros((0, self.feature_dim))
+        self.params = np.random.normal(0, 1, size=[self.n_items, self.feature_dim]) # intercept, context ... , rank
+        # self.params = np.zeros((self.n_items, self.feature_dim)) # intercept, context ... , rank
         self.cov = np.zeros(
             [
-                0,
+                self.n_items,
                 self.feature_dim,
                 self.feature_dim,
             ]
-        ) + self.cov_lambda * np.eye(self.feature_dim)
+        ) + np.eye(self.feature_dim)
+
         self.online_lr = linear_model.SGDClassifier(
             loss="log",
             penalty=None,
@@ -103,210 +100,11 @@ class RankingBanditAgent():
             max_iter=min(MAX_SGD_ITERS, 10 * self.gd_n_steps),
         )
 
-        # instantiate a map from action/product ids to model parameters.
-        self.action_param_map = pd.Series(dtype="int")
-
     @property
     def _exploration_phase(self) -> bool:
         return self.time < self.randomization_horizon
-
-    def get_params(self, action_id: Hashable | List[Hashable]) -> np.ndarray | pd.Series:
-        """Get the parameters for a given action/product id."""
-        if isinstance(action_id, Hashable):
-            return self.params[self.action_param_map[action_id]]
-        if isinstance(action_id, list) and all([isinstance(a, Hashable) for a in action_id]):
-            return pd.DataFrame(
-                self.params[self.action_param_map[action_id].to_numpy()],
-                index=action_id,
-                columns=[INTERCEPT_COL] + self.feature_columns,
-            )
-        else:
-            raise ValueError(
-                f"'action_id' must be hashable or list of hashable objects/ids, got {type(action_id)} "
-                f"and {type(action_id[0]) if 0 < len(action_id) else None}"
-            )
-
-    def fit(self, df: pd.DataFrame) -> RankingBanditAgent:
-        """Fit the Product level Models using the observed features and clicks and update
-        the Covariance matrices using the historical data.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Dataframe containing historical click data with context and action features columns.
-            Must contain the action_id_col to allow the correct product parameters to be updates.
-        """
-
-        self.cov, self.params = self._update_action_param_map(df)
-        updated_params = self._run_concurrent(df, self.action_id_col, self._fit)
-        self.assign_params(updated_params)
-        return self
-
-    def update(self, df: pd.DataFrame) -> RankingBanditAgent:
-        """Update the Covariance using the observed features and clicks and estimate model parameters."""
-
-        self.cov, self.params = self._update_action_param_map(df)
-        updated_params = self._run_concurrent(df, self.action_id_col, self._update)
-        self.assign_params(updated_params)
-        self.time += 1
-        return self
-
-    @staticmethod
-    def _run_concurrent(df: pd.DataFrame, group_by_col: str, callable_fn: Callable, *args: Any) -> List[Any]:
-        """Helper function for concurrent model updates. Used in the fit and update method."""
-
-        grouped_observations = df.groupby(group_by_col)
-        with ProcessPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
-            futures = [
-                executor.submit(callable_fn, action_id, action_group, *args)
-                for action_id, action_group in grouped_observations
-            ]
-
-        return [future.result() for future in as_completed(futures)]
-
-    def assign_params(self, updated_params: list[ParamTuple]) -> None:
-        """Assign the updated model parameters and covariance matrices to the correct action ids."""
-        for param in updated_params:
-            idx = self.action_param_map[param.action_id]
-            self.params[idx] = param.weight
-            self.cov[idx] = param.cov
-
-    def _fit(self, action_id: int, action_group: pd.DataFrame) -> ParamTuple:
-        """Same as _update, but fits models from scratch and trains to each model to convergence."""
-
-        action_index = int(self.action_param_map[action_id])
-        features = action_group[self.feature_columns].to_numpy().astype(float)
-        features = np.hstack([np.ones((features.shape[0], 1)), features])
-        y = action_group[self.reward_col]
-
-        updated_cov = self.cov[action_index] + np.einsum("ij,iv->jv", features, features)
-        fit_lr_weights = self._fit_logistic_regression(features, y.to_numpy().astype(int))
-        return ParamTuple(action_id, fit_lr_weights, updated_cov)
-
-    def _update(self, action_id: int, action_group: pd.DataFrame) -> ParamTuple:
-        """For a selected product, udpate the covariance matrix and estimated model parameters.
-
-        Parameters
-        ----------
-        action_id : str
-            Product id for the product to be updated.
-        action_group : pd.DataFrame
-            dataframe with historical observations for the chosed focal product.
-        """
-
-        action_index = int(self.action_param_map[action_id])
-        features = action_group[self.feature_columns].to_numpy().astype(float)
-        features = np.hstack([np.ones((features.shape[0], 1)), features])
-        y = action_group[self.reward_col].to_numpy().astype(int)
-
-        updated_cov = self.cov[action_index] + np.einsum("ij,iv->jv", features, features)
-        weight = self._partial_fit(X=features, y=y, weight=self.params[action_index])
-        return ParamTuple(action_id, weight, updated_cov)
-
-    def _fit_logistic_regression(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-    ) -> np.ndarray:
-        """Fit the logistic regression model using n-iterations of SGD.
-
-        Checks for convergence by comparing the change in the model parameters between iterations.
-        We use this as opposed to just calling online_lr.fit(), since in the case of a sample with
-        only positive or negative examples, sklearn will raise an error, since model convergence is
-        not well defined in this case (parameters go to +- infinite).
-        """
-
-        if np.any(y) and ~np.all(y):
-            return self.online_lr.fit(X, y).coef_
-
-        # If all examples are positive or negative, use the partial fit method.
-        return self._partial_fit(X, y, np.zeros(X.shape[1]), n_steps=10 * self.gd_n_steps)
-
-    def _partial_fit(self, X: np.ndarray, y: np.ndarray, weight: np.ndarray, n_steps: Optional[int] = None) -> np.ndarray:
-        """Perform online update to the logistic regression model using n-iterations of SGD."""
-        n_steps = min(MAX_SGD_ITERS, n_steps or self.gd_n_steps)
-        for _ in range(n_steps):
-            sgd_clf = self.online_lr._partial_fit(
-                X=X,
-                y=y,
-                alpha=self.online_lr.alpha,
-                C=1.0,
-                loss="log",
-                learning_rate=self.online_lr.learning_rate,
-                classes=ZERO_ONE_CLASSES,
-                sample_weight=None,
-                coef_init=weight,
-                intercept_init=None,
-                max_iter=1,
-            )
-            weight = sgd_clf.coef_
-        return weight
-
-    def _rank(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Computes ranking of items based on UCB/MLE probabilities.
-
-        Note that we compute ucb bonus without the pseudo-inverse by using least square solution to
-        Ay = z. The lstsq solution will be ~A^{+}z, which avoids directly computing the pseudo-inverse,
-        which can be computationally intensive.
-
-        See https://www.notion.so/arena-ai/Learning-to-Rank-6853b8ccd6f84b4caed9c72de339687b for
-        further documentation of the algorithm.
-
-        Parameters
-        ----------
-        df: pd.DataFrame
-            The dataframe corresponding to a **single** state with N possible actions.
-            This would represent a dataframe with N items to ranks for a single
-            user. The context values will be constant, but the 'product' features will change.
-
-        Returns
-        -------
-        rank : pd.DataFrame
-            The DataFrame containing the predicted rankings.
-        """
-
-        features = df[self.state_columns]
-        action_ids = df[self.action_id_col]
-
-        # for each id, we need to evaluate its probability at position k
-        n_products = action_ids.shape[0]
-        n_positions = min(n_products, self._top_k)
-
-        ranks = np.tile(np.arange(n_positions), n_products)  # [num_products * num_position]
-        ones = np.ones(n_positions * n_products)
-        features = np.repeat(features.to_numpy(), repeats=n_positions, axis=0)
-        features = np.hstack([np.expand_dims(ones, 1), features, np.expand_dims(ranks, 1)]).astype(float)
-
-        # user the param map to access the indexes for the parameter and covariance matrices
-        action_indexes = self.action_param_map[action_ids].to_numpy().astype(int)
-        params = np.repeat(self.params[action_indexes], repeats=n_positions, axis=0)
-
-        ucb_bonus = 0
-        if self.ucb:
-            cov = np.repeat(self.cov[action_indexes], repeats=n_positions, axis=0)
-            ATx = np.stack([np.linalg.lstsq(c, z.T, rcond=None)[0] for z, c in zip(features, cov.astype(float))])
-            ucb_bonus = 3 * self.ksi * np.sqrt((features * ATx).sum(axis=1))
-        logit = (params * features).sum(axis=-1) + ucb_bonus
-
-        # the probability matric has products as rows and positions as columns
-        prob = self._sigmoid(logit.reshape(n_products, n_positions).astype(float))
-
-        # if applicable, extract per-product profit/revenue
-        action_costs = df[self.action_weight_col].to_numpy() if self.action_weight_col else None
-        cost_matrix = self._compute_cost_matrix(prob, action_costs)
-        product_idx, product_rank = linear_sum_assignment(cost_matrix, maximize=True)
-
-        # re-attatch original action-id values to ranking dataframe.
-        top_k_products = df[self.action_id_col].iloc[product_idx]
-
-        if self.objective == "Profit":
-            top_k_revenues = df[self.action_weight_col].iloc[product_idx]
-            return pd.DataFrame(
-                {self.action_id_col: top_k_products, self.rank_col: product_rank, self.action_weight_col: top_k_revenues}
-            )
-        else:
-            return pd.DataFrame({self.action_id_col: top_k_products, self.rank_col: product_rank})
-
+    
+    
     def _compute_cost_matrix(
         self, probability_matrix: np.ndarray, action_cost_matrix: Optional[np.ndarray] = None
     ) -> np.ndarray:
@@ -347,29 +145,127 @@ class RankingBanditAgent():
             return probability_matrix * action_cost_matrix
 
 
-    def predict(
-        self,
-        df: pd.DataFrame,
-        keep_all_fields: bool = False,
-    ) -> pd.DataFrame:
-        """Given a dataframe of observations, predict the probability of a click for each recommended product.
+    def update(self, update_arr: np.array, clicks: np.array) -> RankingBanditAgent:
+        # expect update_df to be of the form (n_items, time, [context..., rank])
+        # clicks of the form (n_items, time, 1)
+
+        # randomization period
+        if self.time < self.randomization_horizon - 1:
+            pass
+        elif self.time == self.randomization_horizon - 1:
+            # compute covariance
+            for k in range(self.n_items):
+                cov_feature = update_arr[k, :self.time-1]
+                cov_feature = np.hstack([np.ones((cov_feature.shape[0], 1)), cov_feature]) # stacks intercept term
+                self.cov[k] = np.einsum("ij,ik->jk", cov_feature, cov_feature)
+
+        else:  # start of active learning
+            for k in range(self.n_items):
+                cov_feature = np.expand_dims(update_arr[k, -1], -1)
+                cov_feature = np.vstack([np.ones((1, 1)), cov_feature]) # stacks intercept term
+
+                update_batch = np.hstack([np.ones((update_arr[k].shape[0], 1)), update_arr[k]])
+                self.params[k] = self._solve_logistic_regression(update_batch, clicks[k])
+                self.cov[k] += np.outer(cov_feature, cov_feature)
+        self.time += 1
+        return self
+    
+    def _solve_logistic_regression(self, item_features: np.array, item_clicks: np.array) -> np.ndarray:
+        """Solves for parameters used to compute UCB probability with logistic regression.
 
         Parameters
         ----------
-        df : pd.DataFrame
-            Dataframe containing the user-item pairs which are to be ranked, along with the corresponding features
+        k : int
+            The index of item.
 
         Returns
         -------
-        rankings : pd.DataFrame
-            The DataFrame containing the predicted probabilities
+        params : np.ndarray
+            The array containing the optimized parameters.
         """
-        return self.__rank_or_predict(self._predict, df, keep_all_fields)
+
+        # If no clicks or all clicks for this item, solve logistic regression
+        if not np.any(item_clicks) or np.all(item_clicks):
+            n_steps = min(MAX_SGD_ITERS, self.gd_n_steps*10)
+            weight = np.zeros(item_features.shape[1])
+            for _ in range(n_steps):
+                sgd_clf = self.online_lr._partial_fit(
+                    X=item_features,
+                    y=item_clicks,
+                    alpha=self.online_lr.alpha,
+                    C=1.0,
+                    loss="log",
+                    learning_rate=self.online_lr.learning_rate,
+                    classes=ZERO_ONE_CLASSES,
+                    sample_weight=None,
+                    coef_init=weight,
+                    intercept_init=None,
+                    max_iter=1,
+                )
+                weight = sgd_clf.coef_
+            params = weight.squeeze()
+        else:
+            # solve using sklearn logistic regression
+            model = linear_model.LogisticRegression(fit_intercept=False)
+            params = model.fit(item_features, item_clicks).coef_
+            params = np.array(params).squeeze()
+        return params
+
+
+    # def _ucb_rank(self) -> pd.DataFrame:  # TODO: clip beta values
+    #     """Computes ranking of items based on UCB probabilities.
+
+    #     Returns
+    #     -------
+    #     rank : pd.DataFrame
+    #         The DataFrame containing the predicted rankings.
+    #     """
+    #     # compute augmented features
+    #     z = np.zeros((self.n_items, self.user_context_dim + self.product_context_dim + 1))
+    #     z[:, 0] = np.arange(1, self.n_items + 1)
+    #     for k in range(self.n_items):
+    #         z[k, 1:] = np.hstack(
+    #             (
+    #                 np.array(self.user_context.loc[self.time - 1].values),
+    #                 np.array(self.product_context.loc[self.time - 1][f"score_{k}"]),
+    #             )
+    #         )  # time - 1 is to account for splitting predict from update
+
+    #     # compute ucb probabilities
+    #     ucb_prob = np.zeros((self.n_items, self.n_items))
+    #     for k in range(self.n_items):
+    #         for i in range(self.n_items):
+    #             cov_matrix = np.matmul(np.matmul(np.transpose(z[i]), np.linalg.pinv(self.cov[k])), z[i])
+    #             ucb_prob[k, i] = 1 / (
+    #                 1
+    #                 + np.exp(
+    #                     +np.dot(
+    #                         self.params[k, self.user_context_dim + self.product_context_dim :],
+    #                         i,
+    #                     )
+    #                     - np.dot(
+    #                         np.array(self.user_context.loc[self.time - 1].values, dtype=float),
+    #                         self.params[k, : self.user_context_dim],
+    #                     )
+    #                     - np.dot(
+    #                         np.array(self.product_context.loc[self.time - 1][f"score_{k}"], dtype=float),
+    #                         self.params[k, self.user_context_dim : self.user_context_dim + self.product_context_dim],
+    #                     )
+    #                     - 3 * self.ksi * np.sqrt(cov_matrix)
+    #                 )
+    #             )
+    #     cost_matrix = -np.log(np.maximum(1 - ucb_prob, 1e-8))
+    #     # print("probability: ", ucb_prob)
+    #     # print("cost: ", cost_matrix)
+    #     _, rank = linear_sum_assignment(cost_matrix, maximize=True)
+    #     return pd.DataFrame(rank, columns=["ranking"]), ucb_prob
+    
 
     def rank(
         self,
-        df: pd.DataFrame,
-    ) -> pd.DataFrame:
+        features: np.array,
+        action_weight_col: Any = None,
+    ) -> np.array:
         """Provide a ranking for an arbitrary set of state-item pairs, where state->item is a one->many relation
 
         NOTE: Ensure that the dataframe contains the USER_ID_COLUMN, PRODUCT_ID_COLUMN, & RANK_COLUMN.
@@ -384,81 +280,37 @@ class RankingBanditAgent():
         rankings : pd.DataFrame
             The DataFrame containing the predicted rankings.
         """
+        # features = features_arr[:, -1]
 
-        self.cov, self.params = self._update_action_param_map(df)
+        # for each id, we need to evaluate its probability at position k
 
-        return_df = pd.concat(self._run_concurrent(df, self.state_id_col, self._get_decision, self._exploration_phase))
-        extra_columns = df.columns.difference(return_df.columns).tolist()
-        merge_on_columns = [self.state_id_col, self.action_id_col]
-        return_df = return_df.merge(df[extra_columns + merge_on_columns], on=merge_on_columns)
-        return return_df
+        ranks = np.tile(np.arange(self.n_items), self.n_items)  # [num_products * num_position]
+        ones = np.ones(self.n_items * self.n_items)
+        features = np.repeat(features, repeats=self.n_items, axis=0)
+        features = np.hstack([np.expand_dims(ones, 1), features, np.expand_dims(ranks, 1)]).astype(float)
 
-    def _get_decision(self, state_id: str, context_group: pd.GroupBy, is_exploration_phase: bool) -> pd.DataFrame:
-        """Helper function for parallelizing decision method"""
-        action = pd.DataFrame(columns=[])
-        if is_exploration_phase:
-            # randomly sampling without replacement is equivalent to a uniform random permutation
-            if self.objective == "Profit":
-                n_items, ids = context_group.shape[0], context_group[[self.action_id_col, self.action_weight_col]]
-                rand_ids = ids.loc[np.random.choice(ids.shape[0], min(self._top_k, n_items), replace=False)].reset_index()
-                action = pd.DataFrame(
-                    {
-                        self.action_id_col: rand_ids[self.action_id_col],
-                        self.action_weight_col: rand_ids[self.action_weight_col],
-                        self.rank_col: np.arange(len(rand_ids)),
-                    }
-                )
+        # user the param map to access the indexes for the parameter and covariance matrices
+        params = np.repeat(self.params, repeats=self.n_items, axis=0)
 
-            else:
-                n_items, ids = context_group.shape[0], context_group[self.action_id_col]
-                rand_ids = np.random.choice(ids, min(self._top_k, n_items), replace=False)
-                action = pd.DataFrame({self.action_id_col: rand_ids, self.rank_col: np.arange(len(rand_ids))})
-        else:
-            action = self._rank(context_group)
+        ucb_bonus = 0
+        if self.ucb:
+            cov = np.repeat(self.cov, repeats=self.n_items, axis=0)
+            ATx = np.stack([np.linalg.lstsq(c, z.T, rcond=None)[0] for z, c in zip(features, cov.astype(float))])
+            ucb_bonus = 3 * self.ksi * np.sqrt((features * ATx).sum(axis=1))
+        logit = (params * features).sum(axis=-1) + ucb_bonus
 
-        action[self.state_id_col] = state_id
-        return action
+        # the probability matric has products as rows and positions as columns
+        prob = self._sigmoid(logit.reshape(self.n_items, self.n_items).astype(float))
+
+        # if applicable, extract per-product profit/revenue
+        action_costs = action_weight_col if action_weight_col else None
+        cost_matrix = self._compute_cost_matrix(prob, action_costs)
+        product_idx, product_rank = linear_sum_assignment(cost_matrix, maximize=True)
+        return product_rank
 
     @staticmethod
-    def _sigmoid(z: np.ndarray) -> np.ndarray:
+    def _sigmoid(z: np.ndarray) -> np.ndarray: 
         """Compute the sigmoid function: sigma(z) = 1 / (1 + e^{-z})"""
         return np.reciprocal(1 + np.exp(-z))
 
-    def _update_action_param_map(self, df: pd.DataFrame) -> ParamUpdate:
-        """Maintain map from action-id values to parameters and covariance matrices.
-
-        The action_param_map is indexed on the action_id (a SKU or product ID) **name**, and the value
-        of each element in the series is the **index** of the model parameters and covariance matrix
-        in the covariance and parameter arrays. This allows us to map from the item/action names given by
-        the client to their corresponding model parameters.
-
-        Returns
-        -------
-        cov: np.ndarray
-            Array containing covariance matrices for uncertainty estimation.
-        params: np.ndarray
-            Array of model parameters for per product logistic regression.
-        """
-        observed = set(self.action_param_map.index)
-        new_observations = set(df[self.action_id_col])
-        unobserved = new_observations.difference(observed)
-        cov, params = self.cov, self.params
-
-        n_new = len(unobserved)
-        if 0 < n_new:
-            max_idx = len(self.action_param_map)
-            new_obs = pd.Series(max_idx + np.arange(n_new), index=unobserved)
-            self.action_param_map = pd.concat([self.action_param_map, new_obs]).astype(int)
-
-            new_cov = np.zeros(
-                [
-                    n_new,
-                    self.feature_dim,
-                    self.feature_dim,
-                ]
-            ) + (self.cov_lambda * np.eye(self.feature_dim))
-            new_params = np.zeros([n_new, self.feature_dim])
-            params = np.concatenate([params, new_params], axis=0)
-            cov = np.concatenate([cov, new_cov], axis=0)
-
-        return cov, params
+    
