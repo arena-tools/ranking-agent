@@ -33,6 +33,7 @@ USER_ID_COLUMN = "user_id"
 PRODUCT_ID_COLUMN = "product_id"
 RANK_COLUMN = "rank_col"
 
+#TODO: add seed fix
 
 class RankingBanditAgentSimulationTests(TestCase):
     def setUp(self) -> None:
@@ -101,8 +102,8 @@ class RankingBanditAgentSimulationTests(TestCase):
     @pytest.mark.agent_performance_slow_test
     def test_regret_generative(
         self,
-        runs: int = 100,
-        steps: int = 100,
+        runs: int = 500,
+        steps: int = 500,
         batch_size: int = 1,
         use_all_data: bool = True,
         reward_noise: float = 0.0,
@@ -138,8 +139,8 @@ class RankingBanditAgentSimulationTests(TestCase):
     def _test_regret_base(
         self,
         simulator: Type[AbstractSimulator],
-        runs: int = 100,
-        steps: int = 100,
+        runs: int = 300,
+        steps: int = 500,
         batch_size: int = 1,
         use_all_data: bool = True,
         reward_noise: float = 0.0,
@@ -168,7 +169,11 @@ class RankingBanditAgentSimulationTests(TestCase):
         os.makedirs(RESULTS_SAVE_PATH, exist_ok=True)
         os.makedirs(PLOTS_SAVE_PATH, exist_ok=True)
 
-        ksi_list = [0, 0.03, 0.05, 0.09, 0.1]
+        seed = 42
+        # set random seed
+        np.random.seed(seed)
+
+        ksi_list = [0, 0.1, 0.3, 0.7, 1.0]
 
         regret: dict[float, np.ndarray] = {}
         cumulative: dict[float, np.ndarray] = {}

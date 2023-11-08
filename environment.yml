@@ -1,0 +1,14 @@
+name: ranking
+channels:
+  - defaults
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - numpy=1.22.4
+  - scipy
+  - matplotlib
+  - scikit-learn
+  - pip:
+      - pytest

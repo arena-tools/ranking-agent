@@ -159,7 +159,6 @@ class AbstractSimulator(ABC):
             matrix for probability of clicking at each position.
         """
         features = np.hstack([np.ones((batch.shape[0], 1)), batch])
-        # action_ids = batch[self.agent.action_id_col]
 
         # for each id, we need to evaluate its probability at position k
         n_products = self.n_items
