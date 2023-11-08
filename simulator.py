@@ -1,10 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
-from collections import ChainMap
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import cache
 from numbers import Number
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,8 +10,6 @@ from scipy.optimize import linear_sum_assignment
 from ranking_bandit_agent import RankingBanditAgent
 
 LOG: logging.Logger = logging.getLogger(__name__)
-MAX_CONCURRENCY = 32
-CLICK_PROBABILITY = "click_probability"
 
 RANDOM_SEED = 123
 np.random.seed(RANDOM_SEED)
@@ -109,7 +104,7 @@ class AbstractSimulator(ABC):
                 loc=0.0, scale=add_noise, size=(product_click_prob.shape[0], 1)
             )
             clicks = np.random.binomial(1, p=np.clip(noisy_click_prob, 0, 1))
-            batch = np.hstack([batch, np.expand_dims(batch_rank, -1), clicks]) # TODO: confirm if batch rank should be included
+            batch = np.hstack([batch, np.expand_dims(batch_rank, -1), clicks])
 
             if use_all_data:
                 self.generated_data = np.concatenate([self.generated_data, np.expand_dims(batch, 1)], axis=1)
@@ -172,7 +167,6 @@ class AbstractSimulator(ABC):
             features = np.hstack([features, np.expand_dims(np.array(rank), 1)])
             n_positions = 1  # only evaluating one rank, so only one position per sku
         else:
-            # breakpoint()
             ranks = np.hstack([np.arange(n_positions) for _ in range(n_products)])  # [num_products * num_position]
             features = np.repeat(features, repeats=n_positions, axis=0)
             features = np.hstack([features, np.expand_dims(ranks, 1)])
@@ -192,7 +186,6 @@ class GenerativeSimulator(AbstractSimulator):
 
     def _sample_from_norm_ball(self, dim: int, n_products: int = 1, n_batches: int = 1) -> np.ndarray:
         """Helper function to sample values from a ball of norm 1."""
-        # x = np.random.normal(0, 1, size=[n_batches, dim]).repeat(n_products, axis=0)
         x = np.random.normal(0, 1, size=[n_batches, n_products, dim])
         return (x / np.expand_dims(np.linalg.norm(x, axis=-1), -1)).squeeze()
     
@@ -201,14 +194,8 @@ class GenerativeSimulator(AbstractSimulator):
         and 0-1 values for categorical features (if any).
         """
 
+        # generate continuous context
         continuous_context = self._sample_from_norm_ball(self.context_dim, n_products=self.n_items, n_batches=n_batches)
-
-        assert n_batches == 1, "does not support batch size feature"
-        # generate batch_ids
-        # TODO: support batch size feature
-        # batch_ids = np.arange(self.batch_count, self.batch_count + n_batches)
-        # batch_ids = np.expand_dims(batch_ids, 0).repeat(self.n_positions, axis=0).flatten("F")
-        # batch_ids = np.expand_dims(batch_ids, -1)
 
         # generate item ids
         items = np.expand_dims(np.tile(np.arange(0, self.n_items), n_batches), axis=-1)

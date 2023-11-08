@@ -2,8 +2,7 @@ import logging
 import os
 import copy
 import time
-from itertools import chain
-from typing import List, Type
+from typing import Type
 from unittest import TestCase
 
 import matplotlib.pyplot as plt
@@ -11,29 +10,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ranking_bandit_agent import Profit
-# from feature_quantizer import CategoricalFeature, FeatureOneHotQuantizer
-
-from ranking_bandit_agent import PROPENSITY_COL, UCB_PROPENSITY_COL, UNCERTAINTY_COL, RankingBanditAgent
+from ranking_bandit_agent import RankingBanditAgent
 from simulator import AbstractSimulator, GenerativeSimulator
 
 LOG: logging.Logger = logging.getLogger(__name__)
 
 
+RANDOM_SEED = 123
+np.random.seed(RANDOM_SEED)
+
 PLOTS_SAVE_PATH = "./sim_plots"
 RESULTS_SAVE_PATH = "./sim_results"
 
-MEASURED_REWARD_COLUMN = "realized_reward"
-STATE_COLUMNS: List[str] = ["state_0", "state_1", "state_2"]
-ACTION_ID: str = "test_action_id"
-CONTEXT_COLUMN_PREFIX = "context__"
-EXTRA_COLUMN_PREFIX = "extra__"
-QUANTIZER_SUFFIX = "__quantized"
-USER_ID_COLUMN = "user_id"
-PRODUCT_ID_COLUMN = "product_id"
-RANK_COLUMN = "rank_col"
-
-#TODO: add seed fix
 
 class RankingBanditAgentSimulationTests(TestCase):
     def setUp(self) -> None:
@@ -45,58 +33,6 @@ class RankingBanditAgentSimulationTests(TestCase):
             n_items=self.n_items,
             randomization_horizon=5,
         )
-
-    
-    def test_predict(self) -> None:
-        # The example here is that given we are out of coke,
-        # In what order should we reccommend the 5 beverages?
-
-        for i in range(10):
-            input_df = np.random.rand(self.n_items, i, self.context_dim+1) # first dim for rank
-            clicks = np.random.choice([0, 1], p=[0.5, 0.5], size=(self.n_items,1))
-            self.agent.update(input_df, clicks)
-
-        # breakpoint()
-        output_df = self.agent.rank(input_df[:, :, 1:])
-
-        # # Modify the below expected_output_df here
-        # expected_output_df = pd.DataFrame(
-        #     {
-        #         "user_id": ["123"] * 5,
-        #         "id__context": ["coke"] * 5,
-        #         "id__action__context": ["pepsi", "sprite", "juice", "coffee", "tea"],
-        #         "p_value": [0.5] * 5,
-        #     }
-        # )
-        # pd.testing.assert_frame_equal(output_df, expected_output_df)
-
-    def test_fit_and_update(self) -> None:
-        input_df = pd.DataFrame(
-            {
-                "user_id": ["123", "123", "123", "123", "123"],
-                "id__context": ["coke"] * 5,
-                "context__price": [100, 100, 100, 100, 100],
-                "action__context__price": [150, 100, 120, 130, 140],
-                "action__rank_position": [0, 1, 2, 3, 4],
-                "reward__ordered": [0, 1, 1, 1, 0],
-            }
-        )
-        for i in range(100):
-            print("iter ", i)
-            self.ranking_agent.update(input_df)
-            ranking = self.ranking_agent.predict()
-            input_df["action__rank_position"] = ranking
-            if np.array(ranking.values)[0] == 1 and np.array(ranking.values)[1] == 0:
-                input_df["reward__ordered"] = [1, 1, 0, 0, 0]
-            else:
-                input_df["reward__ordered"] = list(np.random.choice([0, 1], size=(5,), p=[14.0 / 15, 1.0 / 15]))
-                # input_df["reward"] = [0, 0, 0, 0, 0]
-
-            # print("params: ", self.ranking_agent.params)
-            print("ranking: ", ranking.ranking.tolist())
-            print()
-
-        pd.testing.assert_frame_equal(ranking[:2], pd.DataFrame([1, 0], columns=["ranking"]))
 
 
     @pytest.mark.agent_performance_slow_test
@@ -168,10 +104,6 @@ class RankingBanditAgentSimulationTests(TestCase):
         # ensure the save paths exist
         os.makedirs(RESULTS_SAVE_PATH, exist_ok=True)
         os.makedirs(PLOTS_SAVE_PATH, exist_ok=True)
-
-        seed = 42
-        # set random seed
-        np.random.seed(seed)
 
         ksi_list = [0, 0.1, 0.3, 0.7, 1.0]
 

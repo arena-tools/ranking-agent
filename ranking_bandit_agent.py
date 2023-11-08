@@ -1,29 +1,19 @@
 from __future__ import annotations
 
 from collections import namedtuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Callable, Dict, Hashable, List, Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn import linear_model
 
-MAX_CONCURRENCY = 2
-PROPENSITY_COL = "estimated_probability"
-UCB_PROPENSITY_COL = "UCB_" + PROPENSITY_COL
-UNCERTAINTY_COL = "ucb_bonus"
-INTERCEPT_COL = "intercept"
-QUANTIZED_COLUMN_PREFIX = "quantized__"
+
 ZERO_ONE_CLASSES = [0, 1]
 MAX_SGD_ITERS = 100
 
 ParamTuple = namedtuple("ParamTuple", ["action_id", "weight", "cov"])
 ParamUpdate = Tuple[np.ndarray, np.ndarray]
-
-CTR: Literal["click-through-rate"] = "click-through-rate"
-Profit: Literal["profit"] = "profit"
-Objective = Literal["click-through-rate", "profit"]
 
 class RankingBanditAgent(object):
     """Active learning agent that learns to rank.
@@ -72,9 +62,7 @@ class RankingBanditAgent(object):
         self.objective = objective
 
         self.context_dim: int = context_dim
-        self.feature_dim: int = context_dim + 2  # +2 for the rank and intercept term [intercept, features, rank]
-
-        # TODO: expect update df to be [n_items, time, context]
+        self.feature_dim: int = context_dim + 2  # plus 2 for the rank and intercept term [intercept, features, rank]
 
         self._init_model()
         self.time = 0
@@ -82,7 +70,6 @@ class RankingBanditAgent(object):
     def _init_model(self) -> None:
         # initialize empty parameter and covariance matrices
         self.params = np.random.normal(0, 1, size=[self.n_items, self.feature_dim]) # intercept, context ... , rank
-        # self.params = np.zeros((self.n_items, self.feature_dim)) # intercept, context ... , rank
         self.cov = np.zeros(
             [
                 self.n_items,
@@ -146,8 +133,22 @@ class RankingBanditAgent(object):
 
 
     def update(self, update_arr: np.array, clicks: np.array) -> RankingBanditAgent:
-        # expect update_df to be of the form (n_items, time, [context..., rank])
-        # clicks of the form (n_items, time, 1)
+        """Updates the agent given context array and clicks.
+
+        Parameters
+        ----------
+        update_arr: np.ndarray
+            The matrix of context features of shape (n_items, time, n_context + rank) to update
+            the logistic model.
+        clicks: np.ndarray
+            The array of clicks of shape (n_items, time) representing clicks for each item at
+            each timestep.
+
+        Returns
+        -------
+        self : RankingBanditAgent
+            Returns self.
+        """
 
         # randomization period
         if self.time < self.randomization_horizon - 1:
@@ -184,7 +185,7 @@ class RankingBanditAgent(object):
             The array containing the optimized parameters.
         """
 
-        # If no clicks or all clicks for this item, solve logistic regression
+        # If no clicks or all clicks for this item, make partial updates
         if not np.any(item_clicks) or np.all(item_clicks):
             n_steps = min(MAX_SGD_ITERS, self.gd_n_steps*10)
             weight = np.zeros(item_features.shape[1])
@@ -210,55 +211,6 @@ class RankingBanditAgent(object):
             params = model.fit(item_features, item_clicks).coef_
             params = np.array(params).squeeze()
         return params
-
-
-    # def _ucb_rank(self) -> pd.DataFrame:  # TODO: clip beta values
-    #     """Computes ranking of items based on UCB probabilities.
-
-    #     Returns
-    #     -------
-    #     rank : pd.DataFrame
-    #         The DataFrame containing the predicted rankings.
-    #     """
-    #     # compute augmented features
-    #     z = np.zeros((self.n_items, self.user_context_dim + self.product_context_dim + 1))
-    #     z[:, 0] = np.arange(1, self.n_items + 1)
-    #     for k in range(self.n_items):
-    #         z[k, 1:] = np.hstack(
-    #             (
-    #                 np.array(self.user_context.loc[self.time - 1].values),
-    #                 np.array(self.product_context.loc[self.time - 1][f"score_{k}"]),
-    #             )
-    #         )  # time - 1 is to account for splitting predict from update
-
-    #     # compute ucb probabilities
-    #     ucb_prob = np.zeros((self.n_items, self.n_items))
-    #     for k in range(self.n_items):
-    #         for i in range(self.n_items):
-    #             cov_matrix = np.matmul(np.matmul(np.transpose(z[i]), np.linalg.pinv(self.cov[k])), z[i])
-    #             ucb_prob[k, i] = 1 / (
-    #                 1
-    #                 + np.exp(
-    #                     +np.dot(
-    #                         self.params[k, self.user_context_dim + self.product_context_dim :],
-    #                         i,
-    #                     )
-    #                     - np.dot(
-    #                         np.array(self.user_context.loc[self.time - 1].values, dtype=float),
-    #                         self.params[k, : self.user_context_dim],
-    #                     )
-    #                     - np.dot(
-    #                         np.array(self.product_context.loc[self.time - 1][f"score_{k}"], dtype=float),
-    #                         self.params[k, self.user_context_dim : self.user_context_dim + self.product_context_dim],
-    #                     )
-    #                     - 3 * self.ksi * np.sqrt(cov_matrix)
-    #                 )
-    #             )
-    #     cost_matrix = -np.log(np.maximum(1 - ucb_prob, 1e-8))
-    #     # print("probability: ", ucb_prob)
-    #     # print("cost: ", cost_matrix)
-    #     _, rank = linear_sum_assignment(cost_matrix, maximize=True)
-    #     return pd.DataFrame(rank, columns=["ranking"]), ucb_prob
     
 
     def rank(
@@ -280,10 +232,8 @@ class RankingBanditAgent(object):
         rankings : pd.DataFrame
             The DataFrame containing the predicted rankings.
         """
-        # features = features_arr[:, -1]
 
         # for each id, we need to evaluate its probability at position k
-
         ranks = np.tile(np.arange(self.n_items), self.n_items)  # [num_products * num_position]
         ones = np.ones(self.n_items * self.n_items)
         features = np.repeat(features, repeats=self.n_items, axis=0)
