@@ -122,8 +122,8 @@ class RankingBanditAgent(object):
 
             assert (
                 action_cost_matrix is not None
-            ), """Profit maximization objective requires action costs to be provided in the decision
-                dataframe and the relevent column specified in the agent config, but the action_weight_col
+            ), """Profit maximization objective requires action costs to be provided 
+                and the relevent column specified in the agent config, but the action_weight_col
                 value is set to None.
                 """
 
@@ -132,7 +132,7 @@ class RankingBanditAgent(object):
             return probability_matrix * action_cost_matrix
 
 
-    def update(self, update_arr: np.array, clicks: np.array) -> RankingBanditAgent:
+    def update(self, update_arr: np.ndarray, clicks: np.ndarray) -> RankingBanditAgent:
         """Updates the agent given context array and clicks.
 
         Parameters
@@ -171,7 +171,7 @@ class RankingBanditAgent(object):
         self.time += 1
         return self
     
-    def _solve_logistic_regression(self, item_features: np.array, item_clicks: np.array) -> np.ndarray:
+    def _solve_logistic_regression(self, item_features: np.ndarray, item_clicks: np.ndarray) -> np.ndarray:
         """Solves for parameters used to compute UCB probability with logistic regression.
 
         Parameters
@@ -215,22 +215,22 @@ class RankingBanditAgent(object):
 
     def rank(
         self,
-        features: np.array,
+        features: np.ndarray,
         action_weight_col: Any = None,
-    ) -> np.array:
+    ) -> np.ndarray:
         """Provide a ranking for an arbitrary set of state-item pairs, where state->item is a one->many relation
-
-        NOTE: Ensure that the dataframe contains the USER_ID_COLUMN, PRODUCT_ID_COLUMN, & RANK_COLUMN.
 
         Parameters
         ----------
-        df : pd.DataFrame
-            Dataframe containing the user-item pairs which are to be ranked, along with the corresponding features
+        features : np.ndarray
+            Array containing the features for items to be ranked.
+        action_weight_col : Any
+            If given, indicates the weight of each action in a profit setting.
 
         Returns
         -------
-        rankings : pd.DataFrame
-            The DataFrame containing the predicted rankings.
+        product_rank : np.ndarray
+            The array containing the predicted rankings.
         """
 
         # for each id, we need to evaluate its probability at position k

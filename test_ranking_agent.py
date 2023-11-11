@@ -16,9 +16,6 @@ from simulator import AbstractSimulator, GenerativeSimulator
 LOG: logging.Logger = logging.getLogger(__name__)
 
 
-RANDOM_SEED = 123
-np.random.seed(RANDOM_SEED)
-
 PLOTS_SAVE_PATH = "./sim_plots"
 RESULTS_SAVE_PATH = "./sim_results"
 

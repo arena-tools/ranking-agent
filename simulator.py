@@ -39,7 +39,7 @@ class AbstractSimulator(ABC):
     def sample_batch(
         self,
         n_batches: int,
-    ) -> pd.DataFrame:
+    ) -> np.ndarray:
         ...
 
     def evaluate(
@@ -57,18 +57,10 @@ class AbstractSimulator(ABC):
             The number of steps to run the ranking agent.
         batch_size : int
             The number of samples to generate for each batch.
-        data_path : str
-            The path to the data to use for training.
-            This is assumed to be a csv file please check this notebook
-                http://us-lab.arena.tech:8888/lab/tree/notebooks/sam/Training_Dataframe.ipynb)
-            for more information on how to generate this file.
         add_noise: float
             The magnitude of the Gaussian noise to add to the probability of clicks.
         use_all_data : bool
             Whether to accumulate all historical data when updating the agent model.
-        learn_from_data : bool
-            Whether data is provided. If so, use provided data to learn a set of parameters
-            and if not, generate parameters for testing.
 
         Returns
         -------
@@ -82,7 +74,6 @@ class AbstractSimulator(ABC):
 
         regret = []
         self.generated_data = np.zeros((self.n_items, 0, self.feature_dim + 1)) # [n_items, time, feature dim + clicks]
-        # self.batch_identifier = self.agent.state_id_col
         self.batch_count = 0
         n_batches = [batch_size] * steps
 
@@ -123,12 +114,12 @@ class AbstractSimulator(ABC):
                 print(f"Step {batch_idx} of {steps} regret = {regret[-1]:0.4f} Cumulative Regret = {np.sum(regret):0.4f}")
         return regret
 
-    def _get_action_probability(self, current_batch: np.array, rank: Any) -> Tuple[pd.DataFrame, Dict[Any, float]]:
-        # get probability of learned ranking from true model
+    def _get_action_probability(self, current_batch: np.array, rank: Any) -> Tuple[np.ndarray, Dict[Any, float]]:
+        """Helper function for computing the probability of the predicted action under the pre-fit model."""
         click_probabilities = self.get_probabilities(current_batch, rank)
         return click_probabilities, 1 - np.prod(1 - click_probabilities)
 
-    def _get_optimal_probability(self, current_batch: pd.DataFrame) -> Dict[Any, float]:
+    def _get_optimal_probability(self, current_batch: np.ndarray) -> Dict[Any, float]:
         """Helper function for computing the probability of the optimal action under the pre-fit model."""
         true_prob = self.get_probabilities(current_batch)
         cost_matrix_optimal = -np.log(np.maximum(1 - true_prob, 1e-8))
@@ -147,8 +138,8 @@ class AbstractSimulator(ABC):
 
         Parameters
         ----------
-        batch : pd.DataFrame
-            The dataframe for the current batch to compute probabilities for.
+        batch : np.ndarray
+            The array for the current batch to compute probabilities for.
         rank : List (Optional)
             If provided, compute probability of clicking given the rankings, else compute a probability
             matrix for probability of clicking at each position.
