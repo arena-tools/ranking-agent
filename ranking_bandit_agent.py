@@ -43,7 +43,7 @@ class RankingBanditAgent(object):
         randomization_horizon: int = 10,
         gd_n_steps: int = 10,
         learning_rate: float = 0.003,
-        n_items: Optional[int] = 3,
+        n_items: int = 3,
         objective: str = "click-through-rate",
         action_weight_col: Optional[str] = None,
         ucb: bool = True,

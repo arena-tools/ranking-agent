@@ -30,12 +30,6 @@ class AbstractSimulator(ABC):
         self.action_param_map: Dict[Any, Any] = {}
 
     @abstractmethod
-    def setup_data(
-        self,
-    ) -> None:
-        ...
-
-    @abstractmethod
     def sample_batch(
         self,
         n_batches: int,
@@ -114,12 +108,12 @@ class AbstractSimulator(ABC):
                 print(f"Step {batch_idx} of {steps} regret = {regret[-1]:0.4f} Cumulative Regret = {np.sum(regret):0.4f}")
         return regret
 
-    def _get_action_probability(self, current_batch: np.array, rank: Any) -> Tuple[np.ndarray, Dict[Any, float]]:
+    def _get_action_probability(self, current_batch: np.array, rank: Any) -> Tuple[np.ndarray, float]:
         """Helper function for computing the probability of the predicted action under the pre-fit model."""
         click_probabilities = self.get_probabilities(current_batch, rank)
         return click_probabilities, 1 - np.prod(1 - click_probabilities)
 
-    def _get_optimal_probability(self, current_batch: np.ndarray) -> Dict[Any, float]:
+    def _get_optimal_probability(self, current_batch: np.ndarray) -> float:
         """Helper function for computing the probability of the optimal action under the pre-fit model."""
         true_prob = self.get_probabilities(current_batch)
         cost_matrix_optimal = -np.log(np.maximum(1 - true_prob, 1e-8))
@@ -169,11 +163,6 @@ class AbstractSimulator(ABC):
 
 class GenerativeSimulator(AbstractSimulator):
     """Simulator for generated data."""
-
-    def setup_data(self) -> None:
-        self.ground_truth_agent.params = self.generate_params()
-        self.action_param_map = pd.Series({i: i for i in range(self.n_items)}, dtype=int)
-        self.ground_truth_agent.action_param_map = self.action_param_map
 
     def _sample_from_norm_ball(self, dim: int, n_products: int = 1, n_batches: int = 1) -> np.ndarray:
         """Helper function to sample values from a ball of norm 1."""

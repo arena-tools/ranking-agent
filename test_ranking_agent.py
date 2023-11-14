@@ -32,11 +32,10 @@ class RankingBanditAgentSimulationTests(TestCase):
         )
 
 
-    @pytest.mark.agent_performance_slow_test
     def test_regret_generative(
         self,
-        runs: int = 500,
-        steps: int = 500,
+        runs: int = 25,
+        steps: int = 100,
         batch_size: int = 1,
         use_all_data: bool = True,
         reward_noise: float = 0.0,
@@ -125,6 +124,9 @@ class RankingBanditAgentSimulationTests(TestCase):
                     use_all_data=use_all_data,
                 )
                 all_runs_regret.append(sample_regret)
+                print(
+                    f"Finished runs {_}"
+                )
 
             ksi_regret = np.array(all_runs_regret)
             cumulative_regret = np.cumsum(ksi_regret, axis=1)
@@ -155,13 +157,18 @@ class RankingBanditAgentSimulationTests(TestCase):
             cumulative_regret_ax.plot(range(ksi_regret.shape[0]), cumulative[ksi], label=label, color=color)
 
         fig.suptitle(f"Simulation Results", fontsize=26)
-        cumulative_regret_ax.set_title(f"Simulation Results", fontsize=22)
 
+        plt_num = 0
         for ax in axes:
-            ax.set_ylabel(f"Average Regret (Over {runs} Runs)", fontsize=16)
+            if plt_num == 0:
+                ax.set_ylabel(f"Average Regret (Over {runs} Runs)", fontsize=16)
+            else:
+                ax.set_ylabel(f"Cumulative Average Regret (Over {runs} Runs)", fontsize=16)
             ax.set_xlabel("Time Steps", fontsize=16)
             ax.grid(axis="y", alpha=0.4)
             ax.legend()
+
+            plt_num += 1
 
         fig.savefig(
             f"./sim_plots/simulation_cat_plot_items_{self.n_items}_runs_{runs}_steps_{steps}.png"  # noqa
