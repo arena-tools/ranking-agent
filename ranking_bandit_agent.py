@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy
 from scipy.optimize import linear_sum_assignment
 from sklearn import linear_model
 
@@ -79,7 +80,7 @@ class RankingBanditAgent(object):
         ) + np.eye(self.feature_dim)
 
         self.online_lr = linear_model.SGDClassifier(
-            loss="log",
+            loss="log_loss",
             penalty=None,
             fit_intercept=False,
             learning_rate="constant",
@@ -195,7 +196,7 @@ class RankingBanditAgent(object):
                     y=item_clicks,
                     alpha=self.online_lr.alpha,
                     C=1.0,
-                    loss="log",
+                    loss="log_loss",
                     learning_rate=self.online_lr.learning_rate,
                     classes=ZERO_ONE_CLASSES,
                     sample_weight=None,
@@ -250,7 +251,7 @@ class RankingBanditAgent(object):
         logit = (params * features).sum(axis=-1) + ucb_bonus
 
         # the probability matric has products as rows and positions as columns
-        prob = self._sigmoid(logit.reshape(self.n_items, self.n_items).astype(float))
+        prob = scipy.special.expit(logit.reshape(self.n_items, self.n_items).astype(float))
 
         # if applicable, extract per-product profit/revenue
         action_costs = action_weight_col if action_weight_col else None
@@ -258,9 +259,5 @@ class RankingBanditAgent(object):
         product_idx, product_rank = linear_sum_assignment(cost_matrix, maximize=True)
         return product_rank
 
-    @staticmethod
-    def _sigmoid(z: np.ndarray) -> np.ndarray: 
-        """Compute the sigmoid function: sigma(z) = 1 / (1 + e^{-z})"""
-        return np.reciprocal(1 + np.exp(-z))
 
     

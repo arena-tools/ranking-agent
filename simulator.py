@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy
 from scipy.optimize import linear_sum_assignment
 
 from ranking_bandit_agent import RankingBanditAgent
@@ -95,7 +96,7 @@ class AbstractSimulator(ABC):
                 self.generated_data = np.concatenate([self.generated_data, np.expand_dims(batch, 1)], axis=1)
                 self.agent.update(self.generated_data[:, :, :-1], self.generated_data[:, :, -1])
             else:
-                self.agent.update(batch)
+                self.agent.update(np.expand_dims(batch, 1)[:, :, :-1], np.expand_dims(batch, 1)[:, :, -1])
             
             # generate true probabilities for all batch
             optimal_click_prob = self._get_optimal_probability(batch[:,:-2])
@@ -108,7 +109,7 @@ class AbstractSimulator(ABC):
                 print(f"Step {batch_idx} of {steps} regret = {regret[-1]:0.4f} Cumulative Regret = {np.sum(regret):0.4f}")
         return regret
 
-    def _get_action_probability(self, current_batch: np.array, rank: Any) -> Tuple[np.ndarray, float]:
+    def _get_action_probability(self, current_batch: np.ndarray, rank: Any) -> Tuple[np.ndarray, float]:
         """Helper function for computing the probability of the predicted action under the pre-fit model."""
         click_probabilities = self.get_probabilities(current_batch, rank)
         return click_probabilities, 1 - np.prod(1 - click_probabilities)
@@ -124,7 +125,7 @@ class AbstractSimulator(ABC):
 
     def get_probabilities(
         self,
-        batch: np.array,
+        batch: np.ndarray,
         rank: Optional[List[Number]] = None,
     ) -> np.ndarray:
         """Get probabilities of clicks based on ground truth parameters and context.
@@ -158,7 +159,7 @@ class AbstractSimulator(ABC):
             params = np.repeat(params, repeats=n_positions, axis=0)
 
         logit = (params * features).sum(axis=-1)
-        return self.agent._sigmoid(logit.reshape(n_products, n_positions).astype(float))
+        return scipy.special.expit(logit.reshape(n_products, n_positions).astype(float))
 
 
 class GenerativeSimulator(AbstractSimulator):
@@ -169,7 +170,7 @@ class GenerativeSimulator(AbstractSimulator):
         x = np.random.normal(0, 1, size=[n_batches, n_products, dim])
         return (x / np.expand_dims(np.linalg.norm(x, axis=-1), -1)).squeeze()
     
-    def sample_batch(self, n_batches: int) -> np.array:
+    def sample_batch(self, n_batches: int) -> np.ndarray:
         """Sample batches for testing using values sampled from the norm ball for continuous features
         and 0-1 values for categorical features (if any).
         """
