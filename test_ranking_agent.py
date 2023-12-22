@@ -22,20 +22,22 @@ RESULTS_SAVE_PATH = "./sim_results"
 
 class RankingBanditAgentSimulationTests(TestCase):
     def setUp(self) -> None:
-        self.n_items = 5
+        self.n_items = 10
+        self.k = 5
         self.context_dim = 7
 
         self.agent = RankingBanditAgent(
             context_dim=self.context_dim,
             n_items=self.n_items,
+            select_items=self.k,
             randomization_horizon=5,
         )
 
 
     def test_regret_generative(
         self,
-        runs: int = 25,
-        steps: int = 100,
+        runs: int = 300,
+        steps: int = 500,
         batch_size: int = 1,
         use_all_data: bool = True,
         reward_noise: float = 0.0,
@@ -112,7 +114,7 @@ class RankingBanditAgentSimulationTests(TestCase):
             ground_truth_agent = copy.deepcopy(self.agent)
             ranking_agent.ksi = ksi
             ground_truth_agent.ksi = ksi
-            sim = simulator(ranking_agent, ground_truth_agent, self.n_items)
+            sim = simulator(ranking_agent, ground_truth_agent, self.n_items, k=self.k)
 
             print(f"Starting {runs} runs with ksi={ksi}")
             tik = time.perf_counter()

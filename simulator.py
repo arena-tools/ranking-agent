@@ -19,9 +19,9 @@ np.random.seed(RANDOM_SEED)
 class AbstractSimulator(ABC):
     """Abstract simulator class to test agents."""
 
-    def __init__(self, agent: RankingBanditAgent, ground_truth_agent: RankingBanditAgent, num_items: int = 5):
+    def __init__(self, agent: RankingBanditAgent, ground_truth_agent: RankingBanditAgent, num_items: int = 5, k: int = 5):
         self.n_items = num_items
-        self.n_positions = self.n_items
+        self.k = k
         self.context_dim = agent.context_dim
         self.feature_dim = agent.feature_dim - 1 # subtract the intercept term
 
@@ -68,7 +68,7 @@ class AbstractSimulator(ABC):
         self.ground_truth_agent._init_model()
 
         regret = []
-        self.generated_data = np.zeros((self.n_items, 0, self.feature_dim + 1)) # [n_items, time, feature dim + clicks]
+        self.generated_data = {k: np.zeros((0, self.feature_dim + 1)) for k in range(self.n_items)} # [n_items, time, feature dim + clicks]
         self.batch_count = 0
         n_batches = [batch_size] * steps
 
@@ -81,11 +81,13 @@ class AbstractSimulator(ABC):
 
             assert batch.shape[-1] == self.context_dim, "batch does not match context dim"
 
+            items_idx = np.sort(np.random.choice(self.n_items, replace=False, size=self.k))
+
             # generate decisions, and then merge with batch data
-            batch_rank = self.agent.rank(batch)
+            batch_rank = self.agent.rank(batch, items_idx)
 
             # use model learned from sample data to compute the predicted ranking probabilities
-            product_click_prob, click_prob = self._get_action_probability(batch, batch_rank)
+            product_click_prob, click_prob = self._get_action_probability(batch, items_idx, batch_rank)
             noisy_click_prob = product_click_prob + np.random.normal(
                 loc=0.0, scale=add_noise, size=(product_click_prob.shape[0], 1)
             )
@@ -93,13 +95,14 @@ class AbstractSimulator(ABC):
             batch = np.hstack([batch, np.expand_dims(batch_rank, -1), clicks])
 
             if use_all_data:
-                self.generated_data = np.concatenate([self.generated_data, np.expand_dims(batch, 1)], axis=1)
-                self.agent.update(self.generated_data[:, :, :-1], self.generated_data[:, :, -1])
+                for i in range(self.k):
+                    self.generated_data[items_idx[i]] = np.concatenate([self.generated_data[items_idx[i]], np.expand_dims(batch[i], 0)], axis=0)
+                self.agent.update({k: self.generated_data[k][:, :-1] for k in items_idx}, {k: self.generated_data[k][:, -1] for k in items_idx}, items_idx)
             else:
                 self.agent.update(np.expand_dims(batch, 1)[:, :, :-1], np.expand_dims(batch, 1)[:, :, -1])
             
             # generate true probabilities for all batch
-            optimal_click_prob = self._get_optimal_probability(batch[:,:-2])
+            optimal_click_prob = self._get_optimal_probability(batch[:,:-2], items_idx)
 
             time_step_regret = optimal_click_prob - click_prob
             regret += [time_step_regret / n_batches[batch_idx]]
@@ -109,23 +112,24 @@ class AbstractSimulator(ABC):
                 print(f"Step {batch_idx} of {steps} regret = {regret[-1]:0.4f} Cumulative Regret = {np.sum(regret):0.4f}")
         return regret
 
-    def _get_action_probability(self, current_batch: np.ndarray, rank: Any) -> Tuple[np.ndarray, float]:
+    def _get_action_probability(self, current_batch: np.ndarray, item_idx: np.ndarray, rank: Any) -> Tuple[np.ndarray, float]:
         """Helper function for computing the probability of the predicted action under the pre-fit model."""
-        click_probabilities = self.get_probabilities(current_batch, rank)
+        click_probabilities = self.get_probabilities(current_batch, item_idx, rank)
         return click_probabilities, 1 - np.prod(1 - click_probabilities)
 
-    def _get_optimal_probability(self, current_batch: np.ndarray) -> float:
+    def _get_optimal_probability(self, current_batch: np.ndarray, item_idx: np.ndarray) -> float:
         """Helper function for computing the probability of the optimal action under the pre-fit model."""
-        true_prob = self.get_probabilities(current_batch)
+        true_prob = self.get_probabilities(current_batch, item_idx)
         cost_matrix_optimal = -np.log(np.maximum(1 - true_prob, 1e-8))
         _, optimal_ranking = linear_sum_assignment(cost_matrix_optimal, maximize=True)
 
-        optimal_prob = self.get_probabilities(current_batch, optimal_ranking.tolist())
+        optimal_prob = self.get_probabilities(current_batch, item_idx, optimal_ranking.tolist())
         return 1 - np.prod(1 - optimal_prob)
 
     def get_probabilities(
         self,
         batch: np.ndarray,
+        item_idx: np.ndarray, 
         rank: Optional[List[Number]] = None,
     ) -> np.ndarray:
         """Get probabilities of clicks based on ground truth parameters and context.
@@ -142,11 +146,11 @@ class AbstractSimulator(ABC):
         features = np.hstack([np.ones((batch.shape[0], 1)), batch])
 
         # for each id, we need to evaluate its probability at position k
-        n_products = self.n_items
+        n_products = self.k
         n_positions = n_products
 
         # user the param map to access the indexes for the parameter and covariance matrices
-        params = self.ground_truth_agent.params
+        params = self.ground_truth_agent.params[item_idx]
 
         # either evaluate all possible ranks, or only the ones provided by 'rank'
         if not rank is None:
@@ -176,12 +180,12 @@ class GenerativeSimulator(AbstractSimulator):
         """
 
         # generate continuous context
-        continuous_context = self._sample_from_norm_ball(self.context_dim, n_products=self.n_items, n_batches=n_batches)
+        continuous_context = self._sample_from_norm_ball(self.context_dim, n_products=self.k, n_batches=n_batches)
 
         # generate item ids
-        items = np.expand_dims(np.tile(np.arange(0, self.n_items), n_batches), axis=-1)
-        ranking = np.zeros((self.n_positions * n_batches, 1))
-        reward = np.zeros((self.n_positions * n_batches, 1))
+        items = np.expand_dims(np.tile(np.arange(0, self.k), n_batches), axis=-1)
+        ranking = np.zeros((self.k * n_batches, 1))
+        reward = np.zeros((self.k * n_batches, 1))
 
         # add to batch data
         batches = np.hstack((items, continuous_context, ranking, reward))

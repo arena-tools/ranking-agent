@@ -45,6 +45,7 @@ class RankingBanditAgent(object):
         gd_n_steps: int = 10,
         learning_rate: float = 0.003,
         n_items: int = 3,
+        select_items: int = 3,
         objective: str = "click-through-rate",
         action_weight_col: Optional[str] = None,
         ucb: bool = True,
@@ -56,6 +57,7 @@ class RankingBanditAgent(object):
         self.horizon = horizon
         self.randomization_horizon = randomization_horizon
         self.n_items = n_items
+        self.select_items = select_items
         self.gd_n_steps = gd_n_steps
         self.learning_rate = learning_rate
 
@@ -133,7 +135,7 @@ class RankingBanditAgent(object):
             return probability_matrix * action_cost_matrix
 
 
-    def update(self, update_arr: np.ndarray, clicks: np.ndarray) -> RankingBanditAgent:
+    def update(self, update_arr: np.ndarray, clicks: np.ndarray, item_idx: np.ndarray) -> RankingBanditAgent:
         """Updates the agent given context array and clicks.
 
         Parameters
@@ -156,14 +158,14 @@ class RankingBanditAgent(object):
             pass
         elif self.time == self.randomization_horizon - 1:
             # compute covariance
-            for k in range(self.n_items):
-                cov_feature = update_arr[k, :self.time-1]
+            for i, k in enumerate(item_idx):
+                cov_feature = update_arr[k][:self.time-1]
                 cov_feature = np.hstack([np.ones((cov_feature.shape[0], 1)), cov_feature]) # stacks intercept term
                 self.cov[k] = np.einsum("ij,ik->jk", cov_feature, cov_feature)
 
         else:  # start of active learning
-            for k in range(self.n_items):
-                cov_feature = np.expand_dims(update_arr[k, -1], -1)
+            for i, k in enumerate(item_idx):
+                cov_feature = np.expand_dims(update_arr[k][-1], -1)
                 cov_feature = np.vstack([np.ones((1, 1)), cov_feature]) # stacks intercept term
 
                 update_batch = np.hstack([np.ones((update_arr[k].shape[0], 1)), update_arr[k]])
@@ -217,6 +219,7 @@ class RankingBanditAgent(object):
     def rank(
         self,
         features: np.ndarray,
+        item_idx: np.ndarray,
         action_weight_col: Any = None,
     ) -> np.ndarray:
         """Provide a ranking for an arbitrary set of state-item pairs, where state->item is a one->many relation
@@ -235,23 +238,24 @@ class RankingBanditAgent(object):
         """
 
         # for each id, we need to evaluate its probability at position k
-        ranks = np.tile(np.arange(self.n_items), self.n_items)  # [num_products * num_position]
-        ones = np.ones(self.n_items * self.n_items)
-        features = np.repeat(features, repeats=self.n_items, axis=0)
+        ranks = np.tile(np.arange(self.select_items), self.select_items)  # [num_products * num_position]
+        ones = np.ones(self.select_items * self.select_items)
+        features = np.repeat(features, repeats=self.select_items, axis=0)
         features = np.hstack([np.expand_dims(ones, 1), features, np.expand_dims(ranks, 1)]).astype(float)
 
-        # user the param map to access the indexes for the parameter and covariance matrices
-        params = np.repeat(self.params, repeats=self.n_items, axis=0)
+        # user the param map to access the indexes for the parameter and coselect_itemsvariance matrices
+        item_params = self.params[item_idx]
+        params = np.repeat(item_params, repeats=self.select_items, axis=0)
 
         ucb_bonus = 0
         if self.ucb:
-            cov = np.repeat(self.cov, repeats=self.n_items, axis=0)
+            cov = np.repeat(self.cov, repeats=self.select_items, axis=0)
             ATx = np.stack([np.linalg.lstsq(c, z.T, rcond=None)[0] for z, c in zip(features, cov.astype(float))])
             ucb_bonus = 3 * self.ksi * np.sqrt((features * ATx).sum(axis=1))
         logit = (params * features).sum(axis=-1) + ucb_bonus
 
         # the probability matric has products as rows and positions as columns
-        prob = scipy.special.expit(logit.reshape(self.n_items, self.n_items).astype(float))
+        prob = scipy.special.expit(logit.reshape(self.select_items, self.select_items).astype(float))
 
         # if applicable, extract per-product profit/revenue
         action_costs = action_weight_col if action_weight_col else None
